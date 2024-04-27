@@ -1,0 +1,165 @@
+#!/bin/bash
+
+# Get date
+#date=`date +'%Y-%m-%d'`
+date=`date +'%Y-%m-%d_%H:%M'`
+BACKUP_LOC='/data/backup/VM'
+
+# Check if the variable contains a directory path
+if [ ! -d "${BACKUP_LOC}" ]; then
+    echo "Error: ${BACKUP_LOC} is not a directory."
+    exit 1
+fi
+
+# Check if the directory is writable
+if [ ! -w "${BACKUP_LOC}" ]; then
+    echo "Error: ${BACKUP_LOC} is not writable."
+    exit 1
+fi
+
+
+echo "Date: [${date}]"
+
+# Check if no parameter is provided
+if [ $# -eq 0 ]; then
+    echo "$0 [list]";
+    echo "$0 [backup] <name>";
+    exit 1
+fi
+
+# Case statement to check the first parameter
+case "$1" in
+    "list")
+        /usr/bin/virsh list --all
+        ;;
+    "list-backup")
+	#ls -l ${BACKUP_LOC}
+	find ${BACKUP_LOC} -type f
+	;;
+    "backup")
+	if [ $# -lt 2 ]; then
+            echo "A VM name must be supplied";
+	    exit 2;
+        else
+	    VM_NAME=$2;
+	    if virsh list --all | awk "NR > 2 && \$2 == \"${VM_NAME}\" { found=1; exit } END { exit !found }"; then
+		    #echo "VM Exists"
+		    if [ -e ${BACKUP_LOC}/${VM_NAME}/${date} ]; then
+			    echo "Directory ${BACKUP_LOC}/${VM_NAME}/${date} already exists. ABORTING!!!";
+			    exit 4;
+		    fi
+	            mkdir -p ${BACKUP_LOC}/${VM_NAME}/${date}
+		    if [ ! -d ${BACKUP_LOC}/${VM_NAME}/${date} ]; then
+			    echo "Could not create directory: ${BACKUP_LOC}/${VM_NAME}/${date}"
+			    exit 5;
+		    fi
+
+                    # Backup Domain (xml) file
+		    echo "Backing up Domain (xml) file"
+		    echo "    /usr/bin/virsh dumpxml ${VM_NAME} > ${BACKUP_LOC}/${VM_NAME}/${date}/${VM_NAME}.xml"
+		    /usr/bin/virsh dumpxml ${VM_NAME} > ${BACKUP_LOC}/${VM_NAME}/${date}/${VM_NAME}.xml
+		    # Identify Data (qcow2 file
+		    vmDataFiles=$(/usr/bin/virsh domblklist ${VM_NAME} | awk 'NR > 2 && $NF != "-" && NF > 0 {print $NF}');
+
+		    # Backup Data (qcow2) file
+		    echo "Backing up Data (qcow2) files"
+		    for vmDataFile in ${vmDataFiles}; do
+			    destFile=$(/usr/bin/basename "${vmDataFile}");
+			    echo "    cp \"${vmDataFile}\" \"${BACKUP_LOC}/${VM_NAME}/${date}/${destFile}\"";
+			    cp "${vmDataFile}" "${BACKUP_LOC}/${VM_NAME}/${date}/${destFile}";
+                    done;
+
+	    else
+		    echo "VM (${VM_NAME}) does not exist";
+		    exit 3;
+	    fi
+	fi
+        ;;
+    "restore")
+        echo "Restoring VM from backup..."
+	if [ $# -lt 3 ]; then
+            echo "A VM name and backup-date must be supplied";
+	    echo "Syntax: $0 restore <vm-name> <backup>";
+	    exit 6;
+        else
+	    VM_NAME=$2;
+	    RESTORE_POINT=$3;
+	    if virsh list --all | awk "NR > 2 && \$2 == \"${VM_NAME}\" { found=1; exit } END { exit !found }"; then
+		echo "${VM_NAME} already exists. ABORTING!";
+		exit 10;
+	    fi
+	    if [ ! -d ${BACKUP_LOC}/${VM_NAME}/${RESTORE_POINT} ]; then
+		    echo "${BACKUP_LOC}/${VM_NAME}/${RESTORE_POINT}. Does not exist. ABORTING!";
+		    echo "Backups stored in (${BACKUP_LOC}/${VM_NAME}/):";
+		    ls -l ${BACKUP_LOC}/${VM_NAME}/;
+		    exit 11;
+	    fi
+            echo "Restoring VM: ${VM_NAME}...";
+            echo "Defining VM...";
+            echo "  /usr/bin/virsh define ${BACKUP_LOC}/${VM_NAME}/${RESTORE_POINT}/${VM_NAME}.xml";
+            /usr/bin/virsh define ${BACKUP_LOC}/${VM_NAME}/${RESTORE_POINT}/${VM_NAME}.xml;
+	    echo "Copying Data file...";
+
+	    ## TO_DO Fix hard-coded path:
+	    #echo "cp ${BACKUP_LOC}/${VM_NAME}/${date}/*.qcow2 /var/lib/libvirt/images/"; 
+	    #cp ${BACKUP_LOC}/${VM_NAME}/${date}/*.qcow2 /var/lib/libvirt/images/; 
+
+	    # Identify Data (qcow2 file
+            vmDataFiles=$(/usr/bin/virsh domblklist ${VM_NAME} | awk 'NR > 2 && $NF != "-" && NF > 0 {print $NF}');
+
+            # Restore Data (qcow2) file
+            echo "Restoring Data (qcow2) files"
+            for vmDataFile in ${vmDataFiles}; do
+                srcFile=$(/usr/bin/basename "${vmDataFile}");
+		echo "    cp \"${BACKUP_LOC}/${VM_NAME}/${date}/${srcFile}\" \"${vmDataFile}\"";
+		cp "${BACKUP_LOC}/${VM_NAME}/${date}/${srcFile}" "${vmDataFile}";
+            done;
+	fi
+        ;;
+    "delete")
+	if [ $# -lt 2 ]; then
+            echo "A VM name must be supplied";
+	    echo "Syntax: $0 delete <vm-name>";
+	    exit 6;
+        else
+	    VM_NAME=$2;
+	    if virsh list --all | awk "NR > 2 && \$2 == \"${VM_NAME}\" { found=1; exit } END { exit !found }"; then
+		echo "Deleting VM: ${VM_NAME}...";
+		echo "We must remove snapshots first...";
+		vmSnapshots=$(/usr/bin/virsh snapshot-list ${VM_NAME} | awk 'NR>2 {print $1}');
+		for snapshot in $vmSnapshots; do
+			echo "Deleting snapshot: $snapshot";
+			echo "  /usr/bin/virsh snapshot-delete ${VM_NAME} ${snapshot}";
+			/usr/bin/virsh snapshot-delete ${VM_NAME} ${snapshot};
+		done
+		echo "Deleting VM ${VM_NAME}...";
+                echo "  /usr/bin/virsh undefine ${VM_NAME} --remove-all-storage";
+                /usr/bin/virsh undefine ${VM_NAME} --remove-all-storage;
+            else
+		echo "VM (${VM_NAME}) does not exist";
+		exit 3;
+            fi
+	fi
+	;;
+    "snapshot")
+	if [ $# -lt 3 ]; then
+            echo "A VM name must be supplied";
+	    echo "Syntax: $0 snapshot <vm-name> <snapshot-name>";
+	    exit 6;
+        else
+	    VM_NAME=$2;
+	    if virsh list --all | awk "NR > 2 && \$2 == \"${VM_NAME}\" { found=1; exit } END { exit !found }"; then
+                #Do stuff
+	        echo "Taking Snapshot";
+		/usr/bin/virsh snapshot-create-as --domain "${VM_NAME}" --name "$3" 
+	    else
+		echo "VM (${VM_NAME}) does not exist";
+		exit 3;
+            fi
+	fi
+	;;
+    *)
+        echo "Invalid option. Please choose one of: list, backup, restore"
+        ;;
+esac
+
